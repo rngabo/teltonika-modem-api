@@ -65,8 +65,175 @@ def login(base_url, username, password, retries=3, delay=5):
     logger.error("Unable to login after multiple attempts.")
     return None, None
 
-# Other functions here (e.g., get_wireless_interfaces, get_connected_devices, etc.)...
-# Make sure to replace all `app.logger` calls with `logger` instead.
+# Function to get wireless interfaces and their frequency bands
+def get_wireless_interfaces(base_url, session_id):
+    """Fetch the list of wireless interfaces and their frequencies using iwinfo service."""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": [
+            session_id,
+            "iwinfo",
+            "devices",
+            {}
+        ],
+        "id": 1
+    }
+    try:
+        response = requests.post(f"{base_url}/ubus", json=payload, verify=False)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get('result')
+        if result and result[0] == 0:
+            interfaces = result[1].get('devices', [])
+            interface_frequencies = {}
+
+            # Get frequency information for each interface
+            for interface in interfaces:
+                freq_payload = {
+                    "jsonrpc": "2.0",
+                    "method": "call",
+                    "params": [
+                        session_id,
+                        "iwinfo",
+                        "info",
+                        {"device": interface}
+                    ],
+                    "id": 1
+                }
+                freq_response = requests.post(f"{base_url}/ubus", json=freq_payload, verify=False)
+                freq_response.raise_for_status()
+                freq_data = freq_response.json()
+                freq_result = freq_data.get('result')
+                if freq_result and freq_result[0] == 0:
+                    info = freq_result[1]
+                    frequency = info.get('frequency', 0)
+                    if frequency < 3000:
+                        band = '2.4ghz'
+                    else:
+                        band = '5ghz'
+                    interface_frequencies[interface] = band
+                    logger.info(f"Interface '{interface}' operates on {band} band.")
+                else:
+                    logger.error(f"Failed to get frequency info for interface '{interface}'.")
+            logger.info(f"Wireless interfaces and their bands: {interface_frequencies}")
+            return interface_frequencies
+        else:
+            logger.error("Failed to retrieve wireless interfaces.")
+            return {}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"An error occurred while fetching wireless interfaces: {e}")
+        return {}
+
+# Function to get connected devices
+def get_connected_devices(base_url, session_id, interface_frequencies):
+    """Fetch wireless clients connected to the router from specified wireless interfaces."""
+    clients = {'2.4ghz': {}, '5ghz': {}}
+
+    for interface, band in interface_frequencies.items():
+        hostapd_interface = f"hostapd.{interface}"
+        payload = {
+            "method": "call",
+            "params": [
+                session_id,
+                hostapd_interface,
+                "get_clients",
+                {}
+            ],
+            "jsonrpc": "2.0",
+            "id": 1
+        }
+        try:
+            response = requests.post(f"{base_url}/ubus", json=payload, verify=False)
+            response.raise_for_status()
+
+            data = response.json()
+            result = data.get('result')
+            if result and result[0] == 0:
+                interface_clients = result[1].get('clients', {})
+                clients[band].update(interface_clients)
+                logger.info(f"Retrieved {len(interface_clients)} client(s) from interface '{interface}'.")
+            else:
+                logger.error(f"Failed to retrieve wireless client information from '{hostapd_interface}'.")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"An error occurred while fetching wireless client information from '{hostapd_interface}': {e}")
+
+    logger.info(f"Connected clients: {clients}")
+    return clients
+
+# Function to get ARP table
+def get_arp_table(base_url, session_id):
+    """Fetch the ARP table to find IP to MAC mappings."""
+    payload = {
+        "method": "call",
+        "params": [
+            session_id,
+            "network.interface.lan",
+            "status",
+            {}
+        ],
+        "jsonrpc": "2.0",
+        "id": 1
+    }
+    try:
+        response = requests.post(f"{base_url}/ubus", json=payload, verify=False)
+        response.raise_for_status()
+
+        data = response.json()
+        result = data.get('result')
+        if result and result[0] == 0:
+            arp_table = result[1].get('neighbors', [])
+            logger.info(f"ARP table entries: {len(arp_table)}")
+            return arp_table
+        else:
+            logger.error("Failed to retrieve ARP table.")
+            return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"An error occurred while fetching ARP table: {e}")
+        return []
+
+# Function to check router status
+def check_router_status(ip_address, retries=3, delay=2):
+    """Check if the router is reachable by pinging its IP address."""
+    for attempt in range(1, retries + 1):
+        try:
+            # Determine the parameter depending on the OS
+            param = '-n' if platform.system().lower() == 'windows' else '-c'
+
+            # Build the command
+            command = ['ping', param, '1', ip_address]
+
+            # Run the command and capture the output
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            if result.returncode == 0:
+                logger.info(f"Ping successful on attempt {attempt}.")
+                return 1  # Router is reachable
+            else:
+                logger.warning(f"Attempt {attempt}: Ping failed with output:\n{result.stdout}\nError:\n{result.stderr}")
+                if attempt < retries:
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+        except Exception as e:
+            logger.error(f"An error occurred while checking router status: {e}")
+            if attempt < retries:
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+
+    logger.error("Router is not reachable after retries.")
+    return 0  # Router is not reachable after retries
+
+# Function to convert bytes to human-readable format (Optional)
+def format_bytes(bytes_value):
+    """Convert bytes to a human-readable format."""
+    if bytes_value < 1024:
+        return f"{bytes_value} B"
+    elif bytes_value < (1024 ** 2):
+        return f"{bytes_value / 1024:.2f} KB"
+    elif bytes_value < (1024 ** 3):
+        return f"{bytes_value / (1024 ** 2):.2f} MB"
+    else:
+        return f"{bytes_value / (1024 ** 3):.2f} GB"
 
 # Function to get router data
 def get_router_data():
@@ -105,9 +272,140 @@ def get_router_data():
             # Fetch connected wireless clients
             connected_clients = get_connected_devices(base_url, session_id, interface_frequencies)
 
-            # Similar logic for data aggregation as in the original code
+            # Define main devices (lan and wan)
+            main_interfaces = ['lan', 'wan']
+            main_devices = []
 
-    logger.info(f"Collected router data: {json.dumps(response_data, indent=2)}")
+            for iface in main_interfaces:
+                payload = {
+                    "method": "call",
+                    "params": [
+                        session_id,
+                        f"network.interface.{iface}",
+                        "status",
+                        {}
+                    ],
+                    "jsonrpc": "2.0",
+                    "id": 1
+                }
+                try:
+                    response = requests.post(f"{base_url}/ubus", json=payload, verify=False)
+                    response.raise_for_status()
+
+                    data = response.json()
+                    result = data.get('result')
+                    if result and result[0] == 0:
+                        status = result[1]
+                        device_name = status.get('device')
+                        if device_name:
+                            main_devices.append(device_name)
+                            logger.info(f"Interface '{iface}' is associated with device '{device_name}'.")
+                        else:
+                            logger.error(f"No device associated with interface '{iface}'.")
+                    else:
+                        logger.error(f"Failed to retrieve status for interface '{iface}'.")
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"An error occurred while fetching status for interface '{iface}': {e}")
+
+            # Combine main devices with wireless devices
+            devices_to_collect = main_devices + list(interface_frequencies.keys())
+
+            if not devices_to_collect:
+                logger.warning("No devices to collect stats from.")
+            else:
+                # Initialize device lists
+                devices_2ghz = []
+                devices_5ghz = []
+
+                # Process devices on 2.4GHz band
+                if connected_clients.get('2.4ghz'):
+                    for i, (mac_address, client_info) in enumerate(connected_clients['2.4ghz'].items(), start=1):
+                        # Record the connection time if it's a newly connected device
+                        if mac_address not in connection_times:
+                            connection_times[mac_address] = datetime.now()
+
+                        # Calculate the duration since the device connected
+                        connected_since = connection_times[mac_address]
+                        duration = datetime.now() - connected_since
+                        duration_minutes = duration.total_seconds() // 60
+                        duration_hours = int(duration_minutes // 60)
+                        duration_minutes = int(duration_minutes % 60)
+                        formatted_duration = f"{duration_hours} hour(s) {duration_minutes} minute(s)" if duration_hours > 0 else f"{duration_minutes} minute(s)"
+
+                        # Get the device details
+                        device_rx_packets = client_info.get('packets', {}).get('rx', 0)
+                        device_tx_packets = client_info.get('packets', {}).get('tx', 0)
+                        signal_strength = client_info.get('signal', 0)
+
+                        # Check ARP table for IP address
+                        ip_address = arp_mapping.get(mac_address.lower(), 'N/A')
+
+                        # Add device information to the list
+                        devices_2ghz.append({
+                            "device_id": i,
+                            "mac_address": mac_address,
+                            "ip_address": ip_address,
+                            "rx_packets": device_rx_packets,  # Packet counts
+                            "tx_packets": device_tx_packets,  # Packet counts
+                            "signal_strength_dbm": signal_strength,
+                            "connection_duration": formatted_duration
+                        })
+
+                # Process devices on 5GHz band
+                if connected_clients.get('5ghz'):
+                    for i, (mac_address, client_info) in enumerate(connected_clients['5ghz'].items(), start=1):
+                        # Record the connection time if it's a newly connected device
+                        if mac_address not in connection_times:
+                            connection_times[mac_address] = datetime.now()
+
+                        # Calculate the duration since the device connected
+                        connected_since = connection_times[mac_address]
+                        duration = datetime.now() - connected_since
+                        duration_minutes = duration.total_seconds() // 60
+                        duration_hours = int(duration_minutes // 60)
+                        duration_minutes = int(duration_minutes % 60)
+                        formatted_duration = f"{duration_hours} hour(s) {duration_minutes} minute(s)" if duration_hours > 0 else f"{duration_minutes} minute(s)"
+
+                        # Get the device details
+                        device_rx_packets = client_info.get('packets', {}).get('rx', 0)
+                        device_tx_packets = client_info.get('packets', {}).get('tx', 0)
+                        signal_strength = client_info.get('signal', 0)
+
+                        # Check ARP table for IP address
+                        ip_address = arp_mapping.get(mac_address.lower(), 'N/A')
+
+                        # Add device information to the list
+                        devices_5ghz.append({
+                            "device_id": i,
+                            "mac_address": mac_address,
+                            "ip_address": ip_address,
+                            "rx_packets": device_rx_packets,  # Packet counts
+                            "tx_packets": device_tx_packets,  # Packet counts
+                            "signal_strength_dbm": signal_strength,
+                            "connection_duration": formatted_duration
+                        })
+
+                # Update response data with device lists
+                response_data["devices_2_4ghz"] = devices_2ghz
+                response_data["devices_5ghz"] = devices_5ghz
+
+                # Update device counts
+                response_data["total_devices_2.4ghz"] = len(devices_2ghz)
+                response_data["total_devices_5ghz"] = len(devices_5ghz)
+                response_data["total_devices"] = response_data["total_devices_2.4ghz"] + response_data["total_devices_5ghz"]
+
+                # Aggregate packet counts
+                total_rx_packets = sum(device.get('rx_packets', 0) for device in devices_2ghz + devices_5ghz)
+                total_tx_packets = sum(device.get('tx_packets', 0) for device in devices_2ghz + devices_5ghz)
+
+                # Update response data with total packet counts
+                response_data["total_rx_packets"] = total_rx_packets
+                response_data["total_tx_packets"] = total_tx_packets
+
+                logger.info(f"Total RX Packets: {response_data['total_rx_packets']}")
+                logger.info(f"Total TX Packets: {response_data['total_tx_packets']}")
+
+    logger.info(f"Router Data Collected: {json.dumps(response_data, indent=2)}")
     return response_data
 
 # Main loop
