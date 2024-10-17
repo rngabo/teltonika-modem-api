@@ -4,25 +4,23 @@ import json
 import time
 import platform
 import subprocess
-import logging
 from datetime import datetime
 from urllib.parse import urlparse
-
+from flask import Flask, jsonify, request, abort
+ 
 # Suppress only the single warning from urllib3 needed.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+ 
+app = Flask(__name__)
+ 
 # Device credentials (Consider storing these securely)
 base_url = "https://105.178.106.81"  # Adjust to your router's IP address
 username = "admin"
 password = "Salvi.2024"
-
+ 
 # Global variable to track connection times
 connection_times = {}  # Dictionary to track connection times of devices
-
+ 
 # Function to login to the router
 def login(base_url, username, password, retries=3, delay=5):
     """Login to the router and obtain the session ID with retry capability."""
@@ -39,7 +37,7 @@ def login(base_url, username, password, retries=3, delay=5):
         "id": 1
     }
     attempt = 0
-
+ 
     while attempt < retries:
         try:
             response = requests.post(f"{base_url}/ubus", json=payload, verify=False, timeout=10)
@@ -50,21 +48,21 @@ def login(base_url, username, password, retries=3, delay=5):
             if result and result[0] == 0:
                 session_info = result[1]
                 session_id = session_info.get('ubus_rpc_session')
-                logger.info(f"Logged in successfully. Session ID: {session_id}")
+                app.logger.info(f"Logged in successfully. Session ID: {session_id}")
                 return session_id, session_info
             else:
-                logger.error("Failed to obtain session ID.")
+                app.logger.error("Failed to obtain session ID.")
                 return None, None
         except requests.exceptions.RequestException as e:
             attempt += 1
-            logger.warning(f"Login attempt {attempt} failed. Error: {e}")
+            app.logger.warning(f"Login attempt {attempt} failed. Error: {e}")
             if attempt < retries:
-                logger.info(f"Retrying in {delay} seconds...")
+                app.logger.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
-
-    logger.error("Unable to login after multiple attempts.")
+ 
+    app.logger.error("Unable to login after multiple attempts.")
     return None, None
-
+ 
 # Function to get wireless interfaces and their frequency bands
 def get_wireless_interfaces(base_url, session_id):
     """Fetch the list of wireless interfaces and their frequencies using iwinfo service."""
@@ -113,18 +111,18 @@ def get_wireless_interfaces(base_url, session_id):
                     else:
                         band = '5ghz'
                     interface_frequencies[interface] = band
-                    logger.info(f"Interface '{interface}' operates on {band} band.")
+                    app.logger.info(f"Interface '{interface}' operates on {band} band.")
                 else:
-                    logger.error(f"Failed to get frequency info for interface '{interface}'.")
-            logger.info(f"Wireless interfaces and their bands: {interface_frequencies}")
+                    app.logger.error(f"Failed to get frequency info for interface '{interface}'.")
+            app.logger.info(f"Wireless interfaces and their bands: {interface_frequencies}")
             return interface_frequencies
         else:
-            logger.error("Failed to retrieve wireless interfaces.")
+            app.logger.error("Failed to retrieve wireless interfaces.")
             return {}
     except requests.exceptions.RequestException as e:
-        logger.error(f"An error occurred while fetching wireless interfaces: {e}")
+        app.logger.error(f"An error occurred while fetching wireless interfaces: {e}")
         return {}
-
+ 
 # Function to get connected devices
 def get_connected_devices(base_url, session_id, interface_frequencies):
     """Fetch wireless clients connected to the router from specified wireless interfaces."""
@@ -152,15 +150,15 @@ def get_connected_devices(base_url, session_id, interface_frequencies):
             if result and result[0] == 0:
                 interface_clients = result[1].get('clients', {})
                 clients[band].update(interface_clients)
-                logger.info(f"Retrieved {len(interface_clients)} client(s) from interface '{interface}'.")
+                app.logger.info(f"Retrieved {len(interface_clients)} client(s) from interface '{interface}'.")
             else:
-                logger.error(f"Failed to retrieve wireless client information from '{hostapd_interface}'.")
+                app.logger.error(f"Failed to retrieve wireless client information from '{hostapd_interface}'.")
         except requests.exceptions.RequestException as e:
-            logger.error(f"An error occurred while fetching wireless client information from '{hostapd_interface}': {e}")
+            app.logger.error(f"An error occurred while fetching wireless client information from '{hostapd_interface}': {e}")
 
-    logger.info(f"Connected clients: {clients}")
+    app.logger.info(f"Connected clients: {clients}")
     return clients
-
+ 
 # Function to get ARP table
 def get_arp_table(base_url, session_id):
     """Fetch the ARP table to find IP to MAC mappings."""
@@ -183,15 +181,15 @@ def get_arp_table(base_url, session_id):
         result = data.get('result')
         if result and result[0] == 0:
             arp_table = result[1].get('neighbors', [])
-            logger.info(f"ARP table entries: {len(arp_table)}")
+            app.logger.info(f"ARP table entries: {len(arp_table)}")
             return arp_table
         else:
-            logger.error("Failed to retrieve ARP table.")
+            app.logger.error("Failed to retrieve ARP table.")
             return []
     except requests.exceptions.RequestException as e:
-        logger.error(f"An error occurred while fetching ARP table: {e}")
+        app.logger.error(f"An error occurred while fetching ARP table: {e}")
         return []
-
+ 
 # Function to check router status
 def check_router_status(ip_address, retries=3, delay=2):
     """Check if the router is reachable by pinging its IP address."""
@@ -207,22 +205,22 @@ def check_router_status(ip_address, retries=3, delay=2):
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
             if result.returncode == 0:
-                logger.info(f"Ping successful on attempt {attempt}.")
+                app.logger.info(f"Ping successful on attempt {attempt}.")
                 return 1  # Router is reachable
             else:
-                logger.warning(f"Attempt {attempt}: Ping failed with output:\n{result.stdout}\nError:\n{result.stderr}")
+                app.logger.warning(f"Attempt {attempt}: Ping failed with output:\n{result.stdout}\nError:\n{result.stderr}")
                 if attempt < retries:
-                    logger.info(f"Retrying in {delay} seconds...")
+                    app.logger.info(f"Retrying in {delay} seconds...")
                     time.sleep(delay)
         except Exception as e:
-            logger.error(f"An error occurred while checking router status: {e}")
+            app.logger.error(f"An error occurred while checking router status: {e}")
             if attempt < retries:
-                logger.info(f"Retrying in {delay} seconds...")
+                app.logger.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
 
-    logger.error("Router is not reachable after retries.")
+    app.logger.error("Router is not reachable after retries.")
     return 0  # Router is not reachable after retries
-
+ 
 # Function to convert bytes to human-readable format (Optional)
 def format_bytes(bytes_value):
     """Convert bytes to a human-readable format."""
@@ -234,7 +232,7 @@ def format_bytes(bytes_value):
         return f"{bytes_value / (1024 ** 2):.2f} MB"
     else:
         return f"{bytes_value / (1024 ** 3):.2f} GB"
-
+ 
 # Function to get router data
 def get_router_data():
     # Extract IP address from base_url
@@ -262,7 +260,7 @@ def get_router_data():
             # Get wireless interfaces using iwinfo service
             interface_frequencies = get_wireless_interfaces(base_url, session_id)
             if not interface_frequencies:
-                logger.error("No wireless interfaces found. Exiting data collection.")
+                app.logger.error("No wireless interfaces found. Exiting data collection.")
                 return response_data
 
             # Fetch ARP table information
@@ -299,19 +297,19 @@ def get_router_data():
                         device_name = status.get('device')
                         if device_name:
                             main_devices.append(device_name)
-                            logger.info(f"Interface '{iface}' is associated with device '{device_name}'.")
+                            app.logger.info(f"Interface '{iface}' is associated with device '{device_name}'.")
                         else:
-                            logger.error(f"No device associated with interface '{iface}'.")
+                            app.logger.error(f"No device associated with interface '{iface}'.")
                     else:
-                        logger.error(f"Failed to retrieve status for interface '{iface}'.")
+                        app.logger.error(f"Failed to retrieve status for interface '{iface}'.")
                 except requests.exceptions.RequestException as e:
-                    logger.error(f"An error occurred while fetching status for interface '{iface}': {e}")
+                    app.logger.error(f"An error occurred while fetching status for interface '{iface}': {e}")
 
             # Combine main devices with wireless devices
             devices_to_collect = main_devices + list(interface_frequencies.keys())
 
             if not devices_to_collect:
-                logger.warning("No devices to collect stats from.")
+                app.logger.warning("No devices to collect stats from.")
             else:
                 # Initialize device lists
                 devices_2ghz = []
@@ -402,14 +400,41 @@ def get_router_data():
                 response_data["total_rx_packets"] = total_rx_packets
                 response_data["total_tx_packets"] = total_tx_packets
 
-                logger.info(f"Total RX Packets: {response_data['total_rx_packets']}")
-                logger.info(f"Total TX Packets: {response_data['total_tx_packets']}")
+                app.logger.info(f"Total RX Packets: {response_data['total_rx_packets']}")
+                app.logger.info(f"Total TX Packets: {response_data['total_tx_packets']}")
 
-    logger.info(f"Router Data Collected: {json.dumps(response_data, indent=2)}")
     return response_data
-
-# Main loop
-if __name__ == "__main__":
-    while True:
-        get_router_data()
-        time.sleep(3600)  # Run every hour
+ 
+# Route to serve the JSON data at versioned URL
+@app.route('/api/v1/devices', methods=['GET'])
+def get_devices():
+    """
+    Retrieve a summary of all connected devices categorized by their wireless frequency bands.
+    
+    Returns:
+        JSON: A JSON object containing router status, total devices, device counts per band, 
+              total received and transmitted packets, and detailed information for each device.
+    """
+    data = get_router_data()
+    return jsonify(data), 200
+ 
+# Error Handlers for Improved API Responses
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({"error": {"code": 400, "message": "Bad Request"}}), 400
+ 
+@app.errorhandler(401)
+def unauthorized(error):
+    return jsonify({"error": {"code": 401, "message": "Unauthorized"}}), 401
+ 
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": {"code": 404, "message": "Resource Not Found"}}), 404
+ 
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": {"code": 500, "message": "Internal Server Error"}}), 500
+ 
+# Run the application
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
